@@ -68,7 +68,7 @@ DuOcc achieves state-of-the-art performance on Occ3D-nuScenes (**41.9 mIoU**) an
 # Train
 bash local_train.sh DuOcc
 # Test
-bash local_test.sh DuOcc path/to/checkpoint
+bash local_test.sh DuOcc path/to/checkpoint # Recommend to use EMA model weight (e.g., iter_XXXXX_ema.pth)
 ```
 
 ## 🙏 Acknowledgement
