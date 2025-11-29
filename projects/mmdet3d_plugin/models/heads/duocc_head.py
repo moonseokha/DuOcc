@@ -18,16 +18,12 @@ class DuOccHead(nn.Module):
         streamagg=None,
         queryagg=None,
         mask_decoder_head=None,
-        voxel_encoder_backbone=None,
-        voxel_encoder_neck=None,
         positional_encoding=None,
-        img_view_transformer=None,
         det_pred_weight=None,
         group_split=None,
         using_mask="camera",
         occupy_threshold: float = 0.3,
         no_maskhead_infertime: bool = False,
-        surround_occ: bool = False,
         grid_config=None,
         loss_occ: dict = None,
         train_cfg=None,
@@ -37,9 +33,13 @@ class DuOccHead(nn.Module):
         use_occ_loss: bool = True,
     ):
         super().__init__()
-        # Build nested modules from configs if dicts are provided
-        self.streamagg = build_from_cfg(streamagg, PLUGIN_LAYERS) if isinstance(streamagg, dict) else streamagg
+        
+        # Build queryagg and streamagg
         self.queryagg = build_head(queryagg) if isinstance(queryagg, dict) else queryagg
+        
+        # Build streamagg (config should already include voxel_encoder_backbone, voxel_encoder_neck, img_view_transformer, surround_occ, grid_config)
+        self.streamagg = build_from_cfg(streamagg, PLUGIN_LAYERS) if isinstance(streamagg, dict) else streamagg
+        
         if group_split is not None:
             self.group_split = torch.tensor(group_split, dtype=torch.uint8)
 
@@ -61,166 +61,16 @@ class DuOccHead(nn.Module):
             class_weights *= 5.0
             self.loss_occ.class_weight = class_weights
 
-        self.voxel_encoder_backbone = build_backbone(voxel_encoder_backbone) if isinstance(voxel_encoder_backbone, dict) else voxel_encoder_backbone
-        self.voxel_encoder_neck = build_neck(voxel_encoder_neck) if isinstance(voxel_encoder_neck, dict) else voxel_encoder_neck
         self.positional_encoding = build_positional_encoding(positional_encoding) if isinstance(positional_encoding, dict) else positional_encoding
-        self.img_view_transformer = build_from_cfg(img_view_transformer, PLUGIN_LAYERS) if isinstance(img_view_transformer, dict) else img_view_transformer
 
         self.occ_pred_weight = occ_pred_weight
         self.det_pred_weight = det_pred_weight
         self.using_mask = using_mask
         self.occupy_threshold = occupy_threshold
         self.no_maskhead_infertime = no_maskhead_infertime
-        self.surround_occ = surround_occ
-        self.grid_config = grid_config
+        self.grid_config = grid_config  # Keep for build_occ_pos and other uses
         self.use_occ_loss = use_occ_loss
 
-    def encode_voxel_backbone(self, voxel_feat):
-        if self.voxel_encoder_backbone is not None:
-            voxel_feat = self.voxel_encoder_backbone(voxel_feat)
-        if self.voxel_encoder_neck is not None:
-            voxel_feat, _ = self.voxel_encoder_neck(voxel_feat)
-        if isinstance(voxel_feat, (tuple, list)):
-            voxel_feat = voxel_feat[0]
-        return voxel_feat
-
-    @torch.no_grad()
-    def _build_flow_grid(self, grid_size, device, dtype):
-        if self.grid_config is not None:
-            xs = torch.linspace(self.grid_config["x"][0], self.grid_config["x"][1], grid_size[1], device=device)
-            ys = torch.linspace(self.grid_config["y"][0], self.grid_config["y"][1], grid_size[2], device=device)
-            zs = torch.linspace(self.grid_config["z"][0], self.grid_config["z"][1], grid_size[0], device=device)
-        else:
-            xs = torch.linspace(-1, 1, grid_size[1], device=device)
-            ys = torch.linspace(-1, 1, grid_size[2], device=device)
-            zs = torch.linspace(-1, 1, grid_size[0], device=device)
-
-        Z, Y, X = torch.meshgrid(zs, ys, xs)
-        grid = torch.stack([X, Y, Z], dim=-1).unsqueeze(0).to(dtype=dtype)
-        return grid
-
-    def forward_voxel_stage(self, voxel_feat, metas, instance_bank, training: bool, **kwargs):
-        """
-        Stream aggregation, temporal warping, caching, and output permutation for voxel features.
-        Returns:
-            voxel_feat_out: (B, W, L, H, C)
-            vox_occ_list: list or None
-            pred_occ_mask: tensor or None
-        """
-        if (
-            instance_bank.cached_anchor is not None
-            and voxel_feat.shape[0] != instance_bank.cached_anchor.shape[0]
-        ):
-            instance_bank.reset_vox_feature()
-            instance_bank.metas = None
-        prev_vox_feat = instance_bank.cached_vox_feature
-        prev_metas = instance_bank.metas
-
-        vox_occ_list = None
-        pred_occ_mask = None
-
-        if self.streamagg is not None:
-            if prev_vox_feat is None:
-                prev_vox_feat = voxel_feat.clone()
-                prev_metas = None
-            
-            grid_size = prev_vox_feat.shape[2:]
-            grid = self._build_flow_grid(grid_size, device=voxel_feat.device, dtype=voxel_feat.dtype)
-            _, d, h, w, c = grid.shape
-            grid = grid.view(1, d, h, w, c).expand(voxel_feat.shape[0], d, h, w, c)  # (B, H, W, L, 3)
-
-            if prev_metas is not None:
-                prev_times = prev_metas["timestamp"]
-                prev_metas_img = prev_metas["img_metas"]
-            else:
-                prev_times = None
-                prev_metas_img = None
-
-            if prev_metas_img is not None and metas is not None and "img_metas" in metas and metas["img_metas"] is not None:
-                if self.surround_occ:
-                    T_temp2cur = torch.tensor(
-                        np.stack(
-                            [
-                                prev_metas_img[i]["lidar2ego_inv"]
-                                @ prev_metas_img[i]["T_global_inv"]
-                                @ m["T_global"]
-                                @ m["lidar2ego"]
-                                for i, m in enumerate(metas["img_metas"])
-                            ]
-                        ),
-                        device=voxel_feat.device,
-                        dtype=voxel_feat.dtype,
-                    )  # current to previous [B,4,4]
-                else:
-                    T_temp2cur = torch.tensor(
-                        np.stack(
-                            [
-                                prev_metas_img[i]["T_global_inv"]  # global to ego
-                                @ m["T_global"]  # ego to global
-                                for i, m in enumerate(metas["img_metas"])
-                            ]
-                        ),
-                        device=voxel_feat.device,
-                        dtype=voxel_feat.dtype,
-                    )
-            else:
-                T_temp2cur = torch.eye(4, device=voxel_feat.device, dtype=voxel_feat.dtype).unsqueeze(0).repeat(voxel_feat.shape[0], 1, 1)
-
-            grid = torch.matmul(T_temp2cur[:, None, None, None, :3, :3], grid[..., None]).squeeze(-1) + T_temp2cur[
-                :, None, None, None, :3, 3
-            ]
-
-            if self.grid_config is not None:
-                grid[..., 0] -= (self.grid_config["x"][0] + self.grid_config["x"][1]) / 2
-                grid[..., 1] -= (self.grid_config["y"][0] + self.grid_config["y"][1]) / 2
-                grid[..., 2] -= (self.grid_config["z"][0] + self.grid_config["z"][1]) / 2
-                grid[..., 0] /= (self.grid_config["x"][1] - self.grid_config["x"][0]) / 2
-                grid[..., 1] /= (self.grid_config["y"][1] - self.grid_config["y"][0]) / 2
-                grid[..., 2] /= (self.grid_config["z"][1] - self.grid_config["z"][0]) / 2
-
-            prev_vox_feat = F.grid_sample(prev_vox_feat, grid, align_corners=True)
-
-            if prev_times is not None and metas is not None and "timestamp" in metas:
-                time_interval = metas["timestamp"] - prev_times
-                time_interval = time_interval.to(dtype=voxel_feat.dtype)
-                mask = torch.logical_and(torch.abs(time_interval) <= 2.0, time_interval != 0)
-            else:
-                mask = [True for _ in range(voxel_feat.shape[0])]
-
-            for i, m in enumerate(mask):
-                if not m:
-                    if prev_vox_feat.shape[1] != voxel_feat.shape[1]:
-                        if prev_vox_feat is not None:
-                            prev_vox_feat[i] = prev_vox_feat[i].new_zeros(prev_vox_feat[i].shape)
-                    else:
-                        if training:
-                            prev_vox_feat[i] = voxel_feat[i].clone().detach()
-                        else:
-                            prev_vox_feat[i] = voxel_feat[i]
-
-            voxel_feat, vox_occ_list, pred_occ_mask = self.streamagg(voxel_feat, prev_vox_feat, **kwargs)
-
-        instance_bank.cached_vox_feature = voxel_feat.clone()
-        voxel_feat = voxel_feat.permute(0, 3, 4, 2, 1)
-        return voxel_feat, vox_occ_list, pred_occ_mask
-
-    @force_fp32(apply_to=("x", "voxel_feat", "lss_depth"))
-    def voxel_encoder(self, x, metas, instance_bank, training: bool, **kwargs):
-        """
-        Full voxel encoding pipeline:
-        - view transform
-        - voxel backbone+neck
-        - temporal stream aggregation and permutation
-        Returns:
-            voxel_feat_out: (B, W, L, H, C), lss_depth, vox_occ_list, pred_occ_mask
-        """
-        mlp_input = self.img_view_transformer.get_mlp_input(metas["view_tran_comp"])
-        voxel_feat, lss_depth = self.img_view_transformer([x] + metas["view_tran_comp"], metas["projection_mat"], mlp_input)
-        voxel_feat = self.encode_voxel_backbone(voxel_feat)
-        voxel_feat, vox_occ_list, pred_occ_mask = self.forward_voxel_stage(
-            voxel_feat, metas, instance_bank, training, **kwargs
-        )
-        return voxel_feat, lss_depth, vox_occ_list, pred_occ_mask
 
     def forward_train_stage(
         self,
@@ -265,8 +115,8 @@ class DuOccHead(nn.Module):
             for key in list(output.keys()):
                 output[key] *= self.det_pred_weight
 
-        if self.img_view_transformer is not None and "gt_depth" in data and depths_voxel is not None:
-            output["loss_dense_depth"] = self.img_view_transformer.get_depth_loss(data["gt_depth"], depths_voxel)
+        if self.streamagg is not None and self.streamagg.img_view_transformer is not None and "gt_depth" in data and depths_voxel is not None:
+            output["loss_dense_depth"] = self.streamagg.img_view_transformer.get_depth_loss(data["gt_depth"], depths_voxel)
 
         if self.mask_decoder_head is not None:
             loss_occ, mask_head_occ = self.forward_mask_decoder_train(
@@ -368,16 +218,19 @@ class DuOccHead(nn.Module):
         - train: run forward_train_stage and return losses
         - test:  run forward_infer_stage and return outputs
         """
+        # Prepare occ_pos for queryagg (needed in forward_train_stage and forward_infer_stage)
         voxel_size = self._voxel_size_from_grid()
         B = lift_feature.shape[0] if hasattr(lift_feature, "shape") else data.get("img").shape[0]
         dtype = lift_feature.dtype if hasattr(lift_feature, "dtype") else torch.float32
         device = lift_feature.device if hasattr(lift_feature, "device") else (data.get("img").device if isinstance(data, dict) and "img" in data else torch.device("cuda" if torch.cuda.is_available() else "cpu"))
         occ_pos = self.build_occ_pos(voxel_size, B, device, dtype)
 
+        # Extract instance_bank from queryagg
         instance_bank = self.queryagg.instance_bank if hasattr(self, "queryagg") and self.queryagg is not None else None
 
-        voxel_feature, depths_voxel, vox_occ_list, pred_occ_mask = self.voxel_encoder(
-            lift_feature, metas=data, instance_bank=instance_bank, training=self.training, **data
+        # Voxel feature processing (including streamagg) is now handled by streamagg
+        voxel_feature, depths_voxel, vox_occ_list, pred_occ_mask = self.streamagg.voxel_encoder(
+            lift_feature, metas=data, instance_bank=instance_bank, training=self.training, data=data, **data
         )
         if self.training:
             output, _, _, _ = self.forward_train_stage(

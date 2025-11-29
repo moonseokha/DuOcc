@@ -169,37 +169,37 @@ model = dict(
             col_num_embed=100,
             tub_num_embed=8
         ),
-        img_view_transformer=dict(
-            type='LSSViewTransformerBEVDepth',
-            grid_config=grid_config_full,
-            input_size=data_config['input_size'],
-            in_channels=embed_dims,
-            out_channels=numC_Trans,
-            sid=False,
-            collapse_z=False,
-            loss_depth_weight=0.05,
-            depthnet_cfg=dict(use_dcn=False, aspp_mid_channels=96),
-            downsample=16
-        ),
-        voxel_encoder_backbone=dict(
-            type='CustomResNet3D',
-            numC_input=numC_Trans,
-            num_layer=[1,2, 2],
-            with_cp=False,
-            num_channels=[numC_Trans,numC_Trans*2,numC_Trans*2],
-            stride=[1,2,2],
-            backbone_output_ids=[0,1,2],
-        ),
-        voxel_encoder_neck=dict(
-            type='LSSFPN3D_small',
-            in_channels=numC_Trans*5,
-            out_channels=embed_dims,
-            size=(8, 100, 100)),
         streamagg=dict(
             type='StreamAgg',
             embed_dims=embed_dims,
             temp_cat_method=temp_cat_method,
             num_classes=18,
+            img_view_transformer=dict(
+                type='LSSViewTransformerBEVDepth',
+                grid_config=grid_config_full,
+                input_size=data_config['input_size'],
+                in_channels=embed_dims,
+                out_channels=numC_Trans,
+                sid=False,
+                collapse_z=False,
+                loss_depth_weight=0.05,
+                depthnet_cfg=dict(use_dcn=False, aspp_mid_channels=96),
+                downsample=16
+            ),
+            voxel_encoder_backbone=dict(
+                type='CustomResNet3D',
+                numC_input=numC_Trans,
+                num_layer=[1,2, 2],
+                with_cp=False,
+                num_channels=[numC_Trans,numC_Trans*2,numC_Trans*2],
+                stride=[1,2,2],
+                backbone_output_ids=[0,1,2],
+            ),
+            voxel_encoder_neck=dict(
+                type='LSSFPN3D_small',
+                in_channels=numC_Trans*5,
+                out_channels=embed_dims,
+                size=(8, 100, 100)),
             refine_net_cfg=dict(
                 type='RefineNet',
                 channels=embed_dims,
@@ -208,6 +208,7 @@ model = dict(
             ),
             grid_config=grid_config,
             use_forecast_head=True,
+            surround_occ=False,
         ),
         queryagg=dict(
             type="QueryAgg",
