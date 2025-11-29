@@ -63,10 +63,7 @@ class QueryAgg(BaseModule):
         embed_dims: int = 256,
         use_mask_head: bool = False,
         num_img_decoder:int = 5,
-        edited_thr: bool = False,
         use_filter: bool = False,
-        use_strict_thr: bool = False,
-        same_cls_thr: bool = False,
         **kwargs,
     ):
         super(QueryAgg, self).__init__(init_cfg)
@@ -78,9 +75,6 @@ class QueryAgg(BaseModule):
         self.num_single_frame_decoder = num_single_frame_decoder
         self.gt_cls_key = gt_cls_key
         self.gt_reg_key = gt_reg_key
-        self.edited_thr = edited_thr
-        self.use_strict_thr = use_strict_thr
-        self.same_cls_thr = same_cls_thr
         self.use_filter = use_filter
         self.cls_threshold_to_reg = cls_threshold_to_reg
         self.dn_loss_weight = dn_loss_weight
@@ -363,67 +357,34 @@ class QueryAgg(BaseModule):
                         reg = prediction[-1].clone().detach()[:,:num_free_instance][..., : len(self.reg_weights)]
                         cls = classification[-1].clone().detach()[:,:num_free_instance]
                         cls_mask = cls.max(-1)[0].sigmoid()>self.nms_thr
-                        if self.edited_thr:
-                            target_cls,_,_,_,_,_,indices_set= self.sampler.sample(
-                                cls.clone(),
-                                reg.clone(),
-                                metas[self.gt_cls_key],
-                                metas[self.gt_reg_key],
-                                )
-                            if self.use_filter:
-                                cls_score = cls.sigmoid()
-                                target_cls_score = [cls_score[b][indices_set[b][0]].gather(1,target_cls[b][indices_set[b][0]].unsqueeze(1)).squeeze(1) for b in range(len(target_cls))]
-                                for j in range(len(target_cls_score)):
-                                    indices_mask = torch.where(target_cls_score[j]>self.nms_thr)[0]
-                                    if indices_mask.shape[0] == 0:
-                                        all_filter_flag[j] = True
-                                        indices = torch.tensor([0])
-                                    else:
-                                        indices = indices_set[j][0][indices_mask]
-                                    cls_index.append(indices)
+                        
+                        box_cost= self.sampler.sample(
+                            cls.clone(),
+                            reg.clone(),
+                            metas[self.gt_cls_key],
+                            metas[self.gt_reg_key],
+                            return_cost=True,
+                            )
+                        cost_matrix = self.get_cost_mat(cls,reg, metas[self.gt_cls_key],metas[self.gt_reg_key],return_cost_matrix=True) # [pred_ind,gt_ind]
+                        for j in range(len(cost_matrix)):
+                            indices_mask = torch.where(torch.logical_or(box_cost[j][cls_mask[j]].min(-1)[0] < 1.5,cost_matrix[j][:,cls_mask[j]].max(0)[0]>0.3))[0]
+                            
+                            if indices_mask.shape[0] == 0:
+                                all_filter_flag[j] = True
+                                indices = torch.tensor([0],device=voxel_feature.device)
                             else:
-                                cls_max_indices = cls.max(-1)[1]
-                                thr_mask = (cls_max_indices == target_cls)
-                                for j in range(len(thr_mask)):
-                                    indices_mask = torch.where(thr_mask[j][indices_set[j][0]])[0]
-                                    if indices_mask.shape[0] == 0:
-                                        all_filter_flag[j] = True
-                                        indices = torch.tensor([0])
-                                    else:
-                                        indices = indices_set[j][0][indices_mask]
-                                    cls_index.append(indices)
-                        else:
-                            box_cost= self.sampler.sample(
-                                cls.clone(),
-                                reg.clone(),
-                                metas[self.gt_cls_key],
-                                metas[self.gt_reg_key],
-                                return_cost=True,
-                                )
-                            cost_matrix = self.get_cost_mat(cls,reg, metas[self.gt_cls_key],metas[self.gt_reg_key],return_cost_matrix=True) # [pred_ind,gt_ind]
-                            for j in range(len(cost_matrix)):
-                                if self.use_strict_thr:
-                                    indices_mask = torch.where(torch.logical_or(box_cost[j][cls_mask[j]].min(-1)[0] < 0.7,cost_matrix[j][:,cls_mask[j]].max(0)[0]>0.5))[0]
-                                elif self.same_cls_thr:
-                                    cls_scores = cls.sigmoid()
-                                    gt_cls = metas[self.gt_cls_key][j][box_cost[j][cls_mask[j]].min(-1)[1]]
-                                    cls_score_mask = cls_scores[j][cls_mask[j]].gather(1,gt_cls.unsqueeze(1)).squeeze() > self.nms_thr
-                                    thr_mask = torch.logical_or(box_cost[j][cls_mask[j]].min(-1)[0] < 1.5,cost_matrix[j][:,cls_mask[j]].max(0)[0]>0.3)
-                                    indices_mask = torch.where(torch.logical_and( cls_score_mask , thr_mask ))[0]
-                                else:
-                                    indices_mask = torch.where(torch.logical_or(box_cost[j][cls_mask[j]].min(-1)[0] < 1.5,cost_matrix[j][:,cls_mask[j]].max(0)[0]>0.3))[0]
-                                
-                                if indices_mask.shape[0] == 0:
-                                    all_filter_flag[j] = True
-                                    indices = torch.tensor([0],device=voxel_feature.device)
-                                else:
-                                    indices = torch.where(cls_mask[j])[0][indices_mask]
-                                cls_index.append(indices)
+                                indices = torch.where(cls_mask[j])[0][indices_mask]
+                            cls_index.append(indices)
                 else:
                     num_free_instance = instance_feature.shape[1]
                     if self.use_nms_filter:
                         mask = (classification[-1].sigmoid().max(dim=-1)[0]>self.nms_thr)
                         cls_index = [torch.where(mask)[1]]
+                        for j in range(len(cls_index)):
+                            if len(cls_index[j]) == 0:
+                                all_filter_flag[j] = True
+                                indices = torch.tensor([0],device=voxel_feature.device)
+                                cls_index[j] = indices
                 query_feature = instance_feature[:,:num_free_instance].clone()
                 query_anchor_embed = anchor_embed[:,:num_free_instance].clone()
                 for j,flag_mask in enumerate(all_filter_flag):

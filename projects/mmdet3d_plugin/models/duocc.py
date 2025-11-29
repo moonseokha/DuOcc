@@ -158,7 +158,7 @@ class DuOcc(BaseDetector):
             feature_maps, lift_feature, data, origin_feature_maps,
             valid_for_detection=self.valid_for_detection,
         )
-        return output
+        return [output]
 
     def aug_test(self, img, **data):
         # fake test time augmentation
