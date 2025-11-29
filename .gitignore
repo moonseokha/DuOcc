@@ -1,39 +1,50 @@
+# Python
 *.pyc
+__pycache__/
+*.egg-info/
+
+# Data files
 *.npy
+*.pkl
 *.pth
-work_dirs/
-val/
-ckpt/
-data/
+
+# Logs and outputs
+*.log
 *.out
+
+# Build files
 *.so
 *.o
 *ninja*
-/data
+build/
+
+# Jupyter notebooks
+*.ipynb
+
+# Experiment directories
+work_dirs/
+work_*/
+val/
+ckpts/
+data/
+NuScene/
+
+# Results and visualizations
+*results*/
+detection_results/
+visualization*/
+voxonly*/
+origin_images/
+ours_detection_results/
+
+# Project specific
 /deform_attn_3d/build
 /deform_attn_3d/extension_example.egg-info
 /deform_attn_3d/*.so
 /projects/mmdet3d_plugin/models/bev_pool_v2/bev_pool_v2_ext.egg-info
 /projects/mmdet3d_plugin/models/bev_pool_v2/*.so
 /projects/mmdet3d_plugin/models/bev_pool_v2/build
-*.ipynb
-/work_*
 /projects/configs_*/
-/val
-ckpt/
-NuScene/
-*.egg*
-pycache*
-*_pred*
-*results*
-#--------------------for private----------------------
-projects/
-tools/
-local*
-requirement.txt
-lib/
-docs/
-deform_attn_3d/
+
 visualization.py
-LICENSE
-README_full.md
+/tools/viewpoint_params
